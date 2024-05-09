@@ -1,6 +1,7 @@
 import torch 
 import pickle
 import argparse
+import pdb
 from collections.abc import Iterable
 from datasets import load_dataset
 
@@ -12,14 +13,43 @@ from transformers import AutoModelForSequenceClassification, \
 from train import init_model, preprocess_dataset, init_trainer, hyperparameter_search_settings
 from test import init_tester, compute_metrics
 
+import os
+
+torch.manual_seed(42)
+
+def find_max_checkpoint(directory):
+    # 初始化最大的checkpoint文件名和序号
+    max_checkpoint = None
+    max_number = -1
+    
+    # 遍历指定目录下的所有文件
+    for filename in os.listdir(directory):
+        if filename.startswith("checkpoint-"):
+            # 从文件名中提取数字部分
+            number_part = filename[len("checkpoint-"):]
+            try:
+                number = int(number_part)
+                # 检查此文件的序号是否比当前已知的最大序号大
+                if number > max_number:
+                    max_number = number
+                    max_checkpoint = filename
+            except ValueError:
+                # 如果转换int失败，忽略这个文件
+                continue
+    
+    return max_checkpoint
+
+
 
 # Set up argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and test the model.")
 
     # Important arguments
-    parser.add_argument("--dataset_name", type=str, default="wnli", choices=[ "qnli", "rte", "sst2",  "wnli"], help="The name of the dataset to use.")
-    parser.add_argument("--non_bitfit_layers", type=int, default=0, choices=[0, 1, 2, 3, 4], help="The number of non-bitfit layers to use.")
+    parser.add_argument("--dataset_name", type=str, default="rte", choices=[ "qnli", "rte", "sst2",  "wnli"], help="The name of the dataset to use.")
+    parser.add_argument("--n", type=int, default=3, choices=[-1, 0, 1, 2, 3, 4], help="The number of non-bitfit layers to use.")
+    parser.add_argument("--do_train", type=int, default=0, help="Whether to train the model.")
+    parser.add_argument("--experiment_round", type=int, default=2, help="")
     
     # Some of these might be useless
     parser.add_argument("--num_labels", type=int, default=2) # Actually all are 2
@@ -27,7 +57,7 @@ def parse_args():
     parser.add_argument("--tokenizer_name", type=str, default="prajjwal1/bert-mini")
     parser.add_argument("--num_trials", type=int, default=5,
                         help="The number of hyperparameter tuning trials to run.")
-    parser.add_argument("--num_epochs", type=int, default=1,
+    parser.add_argument("--num_epochs", type=int, default=5,
                         help="The number of epochs to train the model for.")
     parser.add_argument("--batch_size", type=int, default=8,
                         help="The batch size to use for training.")
@@ -40,9 +70,13 @@ def parse_args():
 
 def main(args):
 
-    checkpoint_name = f"{args.dataset_name}-{args.non_bitfit_layers}.p"
+    if args.experiment_round == 1:
+        checkpoint_name = f"results/{args.dataset_name}-{args.n}"
+    else:
+        checkpoint_name = f"results/{args.dataset_name}-{args.n}th"
     #print out the args
     print(f"Running with args: {args}")
+    print(f"unfreezing the first {args.n}th layer")
     
     # Load the tokenizer
     tokenizer = BertTokenizerFast.from_pretrained(args.tokenizer_name)
@@ -50,15 +84,10 @@ def main(args):
 
     # Prepare the GLUE dataset from huggingface
     dataset = load_dataset("glue", args.dataset_name)
-    # dataset structure: {train: Dataset, validation: Dataset, test: Dataset}
-    # dataset["train"] : {'sentence': 'hide new secretions from the parental units ',
-    #  'label': 0, 'idx': 0}
-    # see: https://huggingface.co/datasets/nyu-mll/glue/viewer/rte/validation
     split = dataset["train"].train_test_split(test_size=0.2)
+    dataset["test"] = dataset["validation"]
     dataset["train"] = split["train"]
     dataset["validation"] = split["test"]
-    # TODO: use validation as test for now
-    dataset["test"] = dataset["validation"]
 
     dataset["train"] = preprocess_dataset(args.dataset_name, dataset["train"], tokenizer)
     dataset["validation"] = preprocess_dataset(args.dataset_name, dataset["validation"], tokenizer)
@@ -67,23 +96,18 @@ def main(args):
 
     # The first parameter is unused; we just pass None to it
     trainer = init_trainer(dataset["train"], dataset["validation"], args)
-    #trainer.train()
-    best = trainer.hyperparameter_search(**hyperparameter_search_settings())
-    with open(checkpoint_name, "wb") as f:
-        pickle.dump(best, f)
-
-    tester = init_tester("/scratch/jh7956/NLU/project/checkpoints/checkpoint-8419")
-
-    # Test
+    if args.do_train == 1:
+        print("Training the model")
+        trainer.train()
+    
+    # get the checkpoint
+    checkpoint_file = find_max_checkpoint(checkpoint_name)
+    # get the path
+    checkpoint_file = os.path.join(checkpoint_name, checkpoint_file)
+    print(f"Checkpoint file: {checkpoint_file}")
+    tester = init_tester(checkpoint_file)
     results = tester.predict(dataset["test"])
-    with open("test_results_without_bitfit.p", "wb") as f:
-        pickle.dump(results, f)
-
-    with open("test_results_without_bitfit.p", "rb") as f:
-        data = pickle.load(f)
-    print(data)
-
-
+    print(results)
 
 
 if __name__ == "__main__":
