@@ -3,6 +3,7 @@ Code for Problem 1 of HW 2.
 """
 import pickle
 from typing import Any, Dict
+import pdb
 
 import evaluate
 import numpy as np
@@ -52,7 +53,7 @@ def preprocess_dataset(dataset_name, dataset: Dataset, tokenizer: BertTokenizerF
 
 
 
-def init_model(trial: Any, model_name: str, non_bitfit_layers: int = None) -> BertForSequenceClassification:
+def init_model(trial: Any, model_name: str, n: int = None, experiment_round=1) -> BertForSequenceClassification:
     """
     Initialize a BertForSequenceClassification model with the option to exclude BitFit from specified final layers.
 
@@ -66,22 +67,44 @@ def init_model(trial: Any, model_name: str, non_bitfit_layers: int = None) -> Be
 
     """
     model = BertForSequenceClassification.from_pretrained(model_name)
-    # Total number of layers in the BERT model
     total_layers = model.config.num_hidden_layers
-    if non_bitfit_layers != total_layers:
-        # Determine the first layer to exclude from BitFit
-        first_non_bitfit_layer = total_layers - non_bitfit_layers if non_bitfit_layers is not None else 0
+    first_non_bitfit_layer = total_layers - n
+    parameter_size = 0
+    # Total number of layers in the BERT model
+    for name, param in model.named_parameters():
+        # Determine the layer number from parameter name (assumes the name includes layer number)
+        # name is something like: bert.encoder.layer.0.attention.self.query.weight
+        layer_number = int(name.split('.')[3]) if 'layer' in name else -1
 
-        for name, param in model.named_parameters():
-            # Determine the layer number from parameter name (assumes the name includes layer number)
-            # name is something like: bert.encoder.layer.0.attention.self.query.weight
-            layer_number = int(name.split('.')[3]) if 'layer' in name else -1
-
-            # Apply BitFit by freezing non-bias parameters in all but the last `non_bitfit_layers`
-            if "bias" not in name and layer_number < first_non_bitfit_layer:
+        if experiment_round== 2:
+            # Apply BitFit except the exact one layer indicated by non_bitfit_layer_index
+            if layer_number == n or "bias" in name:
+                param.requires_grad = True
+            else:
                 param.requires_grad = False
+            if "classifier" in name:
+                param.requires_grad = True
+        elif experiment_round == 1:
+            # if layer_number <= n or "bias" in name:
+            #     param.requires_grad = True
+            # else:
+            #     param.requires_grad = False
+            if n >=0 :
+                if "bias" not in name and layer_number < first_non_bitfit_layer:
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
+                
+                if "classifier" in name:
+                    param.requires_grad = True
             else:
                 param.requires_grad = True
+        
+            
+        print(f"{name} requires grad: {param.requires_grad}")
+
+    parameter_size = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total number of parameters: {parameter_size}")
 
     return model
 
@@ -110,11 +133,15 @@ def init_trainer(train_data: Dataset, val_data: Dataset, args) -> Trainer:
         than bias terms
     :return: A Trainer used for training
     """
+    if args.experiment_round == 1:
+        checkpoint_name = f"results/{args.dataset_name}-{args.n}"
+    else:
+        checkpoint_name = f"results/{args.dataset_name}-{args.n}th"
 
     training_args = TrainingArguments(
-    output_dir="./checkpoints",
+    output_dir=checkpoint_name,
     report_to="all",
-    learning_rate=2e-5,
+    learning_rate=args.learning_rate,
     per_device_train_batch_size=args.batch_size,
     per_device_eval_batch_size=args.batch_size,
     num_train_epochs=args.num_epochs,
@@ -124,7 +151,7 @@ def init_trainer(train_data: Dataset, val_data: Dataset, args) -> Trainer:
     load_best_model_at_end=True)
 
     #model = init_model(None, model_name, use_bitfit)
-    trainer = Trainer(model_init=lambda: init_model(None, args.model_name, args.non_bitfit_layers), args = training_args, train_dataset=train_data, eval_dataset=val_data, compute_metrics=compute_metrics,)
+    trainer = Trainer(model_init=lambda: init_model(None, args.model_name, args.n, args.experiment_round), args = training_args, train_dataset=train_data, eval_dataset=val_data, compute_metrics=compute_metrics,)
     return trainer
 
 
@@ -142,15 +169,14 @@ def hyperparameter_search_settings() -> Dict[str, Any]:
         return {
             "learning_rate": trial.suggest_categorical("learning_rate", [3e-4, 1e-4, 5e-5, 3e-5]),  
             "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32, 64, 128]),
-            "num_train_epochs": 4,
+            "num_train_epochs": 8,
         }
 
 
 
     search_space_dict = {
             'learning_rate': [3e-4, 1e-4, 5e-5, 3e-5],
-            'per_device_train_batch_size': [8, 16, 32, 64, 128],
-            'num_train_epochs': [4],
+            'per_device_train_batch_size': [8, 32, 64, 128],
         }
 
     # Define the settings for hyperparameter search
